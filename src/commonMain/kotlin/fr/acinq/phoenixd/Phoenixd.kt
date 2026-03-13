@@ -26,10 +26,9 @@ import fr.acinq.lightning.NodeParams
 import fr.acinq.lightning.PaymentEvents
 import fr.acinq.lightning.blockchain.electrum.ElectrumClient
 import fr.acinq.lightning.blockchain.electrum.ElectrumWatcher
-// TODO: wire up KnotsDescriptorWallet for full descriptor protocol support
-// import fr.acinq.lightning.blockchain.knots.KnotsClient
-// import fr.acinq.lightning.blockchain.knots.KnotsDescriptorWallet
-// import fr.acinq.lightning.blockchain.knots.KnotsWatcher
+import fr.acinq.lightning.blockchain.knots.KnotsClient
+import fr.acinq.lightning.blockchain.knots.KnotsDescriptorWallet
+import fr.acinq.lightning.blockchain.knots.KnotsWatcher
 import fr.acinq.lightning.utils.ServerAddress
 import fr.acinq.lightning.blockchain.mempool.MempoolSpaceClient
 import fr.acinq.lightning.blockchain.mempool.MempoolSpaceWatcher
@@ -319,17 +318,33 @@ class Phoenixd : CliktCommand() {
                 require(parts.size == 2) { "Invalid electrum server format, expected host:port" }
                 parts[0] to parts[1].toInt()
             }
-            consoleLog(cyan("electrum server: $host:$port"))
-            val electrumClient = ElectrumClient(scope = scope, loggerFactory = loggerFactory, pingInterval = 30.seconds, rpcTimeout = 10.seconds)
-            val electrumWatcher = ElectrumWatcher(client = electrumClient, scope = scope, loggerFactory = loggerFactory)
+            consoleLog(cyan("knots electrum server: $host:$port"))
+
+            // Create Knots descriptor wallet and connect
+            val serverAddr = ServerAddress(host, port, TcpSocket.TLS.DISABLED)
+            val knotsWallet = KnotsDescriptorWallet(serverAddr, scope, loggerFactory)
+            val knotsClient = KnotsClient(knotsWallet)
+            val knotsWatcher = KnotsWatcher(knotsWallet)
+
+            // Get the swap-in descriptor from the key manager
+            val swapInDescriptor = nodeParams.keyManager.swapInOnChainWallet.publicDescriptor
+            val walletName = "phoenixd_${nodeParams.nodeId.toHex().take(8)}"
+            consoleLog(cyan("importing descriptor to knots wallet: $walletName"))
+
             scope.launch {
-                electrumClient.connect(ServerAddress(host, port, TcpSocket.TLS.DISABLED), TcpSocket.Builder())
+                knotsWallet.connect(
+                    socketBuilder = TcpSocket.Builder(),
+                    walletName = walletName,
+                    descriptor = swapInDescriptor,
+                )
             }
+
             Peer(
-                nodeParams = nodeParams, walletParams = lsp.walletParams, client = electrumClient, watcher = electrumWatcher, db = object : Databases {
+                nodeParams = nodeParams, walletParams = lsp.walletParams, client = knotsClient, watcher = knotsWatcher, db = object : Databases {
                     override val channels: ChannelsDb get() = channelsDb
                     override val payments: PaymentsDb get() = paymentsDb
-                }, socketBuilder = TcpSocket.Builder(), scope
+                }, socketBuilder = TcpSocket.Builder(), scope,
+                externalSwapInWalletState = knotsWallet.walletStateFlow,
             )
         } else {
             val mempoolSpace = MempoolSpaceClient(mempoolSpaceUrl, loggerFactory)
