@@ -24,6 +24,9 @@ import fr.acinq.lightning.Lightning.randomBytes32
 import fr.acinq.lightning.LiquidityEvents
 import fr.acinq.lightning.NodeParams
 import fr.acinq.lightning.PaymentEvents
+import fr.acinq.lightning.blockchain.electrum.ElectrumClient
+import fr.acinq.lightning.blockchain.electrum.ElectrumWatcher
+import fr.acinq.lightning.utils.ServerAddress
 import fr.acinq.lightning.blockchain.mempool.MempoolSpaceClient
 import fr.acinq.lightning.blockchain.mempool.MempoolSpaceWatcher
 import fr.acinq.lightning.crypto.LocalKeyManager
@@ -84,6 +87,10 @@ class Phoenixd : CliktCommand() {
                 else -> error("unsupported chain")
             }
         }
+    private val electrumServer by option(
+        "--electrum-server",
+        help = "Connect to a custom Electrum server instead of mempool.space (format: host:port, e.g. 127.0.0.1:50001)"
+    )
     private val mempoolPollingInterval by option(
         "--mempool-space-polling-interval-minutes",
         help = "Polling interval for mempool.space API",
@@ -302,14 +309,34 @@ class Phoenixd : CliktCommand() {
         val channelsDb = SqliteChannelsDb(driver, database)
         val paymentsDb = SqlitePaymentsDb(database)
 
-        val mempoolSpace = MempoolSpaceClient(mempoolSpaceUrl, loggerFactory)
-        val watcher = MempoolSpaceWatcher(mempoolSpace, scope, loggerFactory, pollingInterval = mempoolPollingInterval)
-        val peer = Peer(
-            nodeParams = nodeParams, walletParams = lsp.walletParams, client = mempoolSpace, watcher = watcher, db = object : Databases {
-                override val channels: ChannelsDb get() = channelsDb
-                override val payments: PaymentsDb get() = paymentsDb
-            }, socketBuilder = TcpSocket.Builder(), scope
-        )
+        val peer = if (electrumServer != null) {
+            val (host, port) = electrumServer!!.let {
+                val parts = it.split(":")
+                require(parts.size == 2) { "Invalid electrum server format, expected host:port" }
+                parts[0] to parts[1].toInt()
+            }
+            consoleLog(cyan("electrum server: $host:$port"))
+            val electrumClient = ElectrumClient(scope = scope, loggerFactory = loggerFactory, pingInterval = 30.seconds, rpcTimeout = 10.seconds)
+            val electrumWatcher = ElectrumWatcher(client = electrumClient, scope = scope, loggerFactory = loggerFactory)
+            scope.launch {
+                electrumClient.connect(ServerAddress(host, port, TcpSocket.TLS.DISABLED), TcpSocket.Builder())
+            }
+            Peer(
+                nodeParams = nodeParams, walletParams = lsp.walletParams, client = electrumClient, watcher = electrumWatcher, db = object : Databases {
+                    override val channels: ChannelsDb get() = channelsDb
+                    override val payments: PaymentsDb get() = paymentsDb
+                }, socketBuilder = TcpSocket.Builder(), scope
+            )
+        } else {
+            val mempoolSpace = MempoolSpaceClient(mempoolSpaceUrl, loggerFactory)
+            val watcher = MempoolSpaceWatcher(mempoolSpace, scope, loggerFactory, pollingInterval = mempoolPollingInterval)
+            Peer(
+                nodeParams = nodeParams, walletParams = lsp.walletParams, client = mempoolSpace, watcher = watcher, db = object : Databases {
+                    override val channels: ChannelsDb get() = channelsDb
+                    override val payments: PaymentsDb get() = paymentsDb
+                }, socketBuilder = TcpSocket.Builder(), scope
+            )
+        }
 
         val eventsFlow: SharedFlow<ApiType.ApiEvent> = MutableSharedFlow<ApiType.ApiEvent>().run {
             scope.launch {
