@@ -324,7 +324,7 @@ class Phoenixd : CliktCommand() {
             val serverAddr = ServerAddress(host, port, TcpSocket.TLS.DISABLED)
             val knotsWallet = KnotsDescriptorWallet(serverAddr, scope, loggerFactory)
             val knotsClient = KnotsClient(knotsWallet)
-            val knotsWatcher = KnotsWatcher(knotsWallet)
+            val knotsWatcher = KnotsWatcher(knotsWallet, scope, loggerFactory)
 
             // Get the swap-in descriptor from the key manager
             val swapInDescriptor = nodeParams.keyManager.swapInOnChainWallet.publicDescriptor
