@@ -50,6 +50,15 @@ data class LSP(val walletParams: WalletParams, val swapInXpub: String) {
                     swapInParams
                 )
             )
+            is Chain.Regtest -> LSP(
+                swapInXpub = "tpubDAmCFB21J9ExKBRPDcVxSvGs9jtcf8U1wWWbS1xTYmnUsuUHPCoFdCnEGxLE3THSWcQE48GHJnyz8XPbYUivBMbLSMBifFd3G9KmafkM9og",
+                walletParams = WalletParams(
+                    trampolineNode = NodeUri(PublicKey.fromHex("03933884aaf1d6b108397e5efe5c86bcf2d8ca8d2f700eda99db9214fc2712b134"), "127.0.0.1", 9735),
+                    trampolineFees,
+                    invoiceDefaultRoutingFees,
+                    swapInParams
+                )
+            )
             else -> error("unsupported chain $chain")
         }
     }

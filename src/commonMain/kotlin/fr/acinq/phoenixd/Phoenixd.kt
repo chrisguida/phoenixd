@@ -26,6 +26,10 @@ import fr.acinq.lightning.NodeParams
 import fr.acinq.lightning.PaymentEvents
 import fr.acinq.lightning.blockchain.electrum.ElectrumClient
 import fr.acinq.lightning.blockchain.electrum.ElectrumWatcher
+// TODO: wire up KnotsDescriptorWallet for full descriptor protocol support
+// import fr.acinq.lightning.blockchain.knots.KnotsClient
+// import fr.acinq.lightning.blockchain.knots.KnotsDescriptorWallet
+// import fr.acinq.lightning.blockchain.knots.KnotsWatcher
 import fr.acinq.lightning.utils.ServerAddress
 import fr.acinq.lightning.blockchain.mempool.MempoolSpaceClient
 import fr.acinq.lightning.blockchain.mempool.MempoolSpaceWatcher
@@ -76,7 +80,7 @@ class Phoenixd : CliktCommand() {
         help = "Agree to terms of service"
     ).flag()
     private val chain by option("--chain", help = "Bitcoin chain to use").choice(
-        "mainnet" to Chain.Mainnet, "testnet" to Chain.Testnet3
+        "mainnet" to Chain.Mainnet, "testnet" to Chain.Testnet3, "regtest" to Chain.Regtest
     ).default(Chain.Mainnet, defaultForHelp = "mainnet")
     private val mempoolSpaceUrl by option("--mempool-space-url", help = "Custom mempool.space instance")
         .convert { Url(it) }
@@ -84,7 +88,7 @@ class Phoenixd : CliktCommand() {
             when (chain) {
                 Chain.Mainnet -> MempoolSpaceClient.OfficialMempoolMainnet
                 Chain.Testnet3 -> MempoolSpaceClient.OfficialMempoolTestnet3
-                else -> error("unsupported chain")
+                else -> Url("http://127.0.0.1") // regtest: mempool.space not available, use --electrum-server instead
             }
         }
     private val electrumServer by option(
