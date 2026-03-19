@@ -78,6 +78,9 @@ sealed class ApiType {
     )
 
     @Serializable
+    data class SwapInAddress(val address: String?, val index: Int?) : ApiType()
+
+    @Serializable
     data class Balance(@SerialName("balanceSat") val amount: Satoshi, @SerialName("feeCreditSat") val feeCredit: Satoshi) : ApiType()
 
     @Serializable

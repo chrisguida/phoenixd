@@ -68,6 +68,7 @@ class Api(
     private val nodeParams: NodeParams,
     private val peer: Peer,
     private val eventsFlow: SharedFlow<ApiEvent>,
+    private val swapInAddressFlow: StateFlow<Pair<String, Int>?>,
     private val fullAccessPassword: String,
     private val limitedAccessPassword: String,
     private val webhookUrls: List<Url>,
@@ -159,6 +160,14 @@ class Api(
                         version = BuildVersions.phoenixdVersion
                     )
                     call.respond(info)
+                }
+                get("getswapinaddress") {
+                    val current = swapInAddressFlow.value
+                    if (current != null) {
+                        call.respond(SwapInAddress(current.first, current.second))
+                    } else {
+                        call.respond(SwapInAddress(null, null))
+                    }
                 }
                 get("getbalance") {
                     val balance = peer.channels.values

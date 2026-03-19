@@ -312,6 +312,9 @@ class Phoenixd : CliktCommand() {
         val channelsDb = SqliteChannelsDb(driver, database)
         val paymentsDb = SqlitePaymentsDb(database)
 
+        // Flow for the current swap-in address (address, index) — used by the API
+        val swapInAddressFlow: StateFlow<Pair<String, Int>?>
+
         val peer = if (electrumServer != null) {
             val (host, port) = electrumServer!!.let {
                 val parts = it.split(":")
@@ -322,9 +325,10 @@ class Phoenixd : CliktCommand() {
 
             // Create Knots descriptor wallet and connect
             val serverAddr = ServerAddress(host, port, TcpSocket.TLS.DISABLED)
-            val knotsWallet = KnotsDescriptorWallet(serverAddr, scope, loggerFactory)
+            val knotsWallet = KnotsDescriptorWallet(serverAddr, chain, nodeParams.keyManager.swapInOnChainWallet, scope, loggerFactory)
             val knotsClient = KnotsClient(knotsWallet)
             val knotsWatcher = KnotsWatcher(knotsWallet, scope, loggerFactory)
+            swapInAddressFlow = knotsWallet.swapInAddressFlow
 
             // Get the swap-in descriptor from the key manager
             val swapInDescriptor = nodeParams.keyManager.swapInOnChainWallet.publicDescriptor
@@ -332,11 +336,22 @@ class Phoenixd : CliktCommand() {
             consoleLog(cyan("importing descriptor to knots wallet: $walletName"))
 
             scope.launch {
-                knotsWallet.connect(
-                    socketBuilder = TcpSocket.Builder(),
-                    walletName = walletName,
-                    descriptor = swapInDescriptor,
-                )
+                while (true) {
+                    try {
+                        knotsWallet.connect(
+                            socketBuilder = TcpSocket.Builder(),
+                            walletName = walletName,
+                            descriptor = swapInDescriptor,
+                        )
+                        // Wait for connection to be established, then wait for disconnect
+                        knotsWallet.connected.first { it }
+                        knotsWallet.connected.first { !it }
+                    } catch (e: Throwable) {
+                        consoleLog(yellow("knots connection error: ${e.message}"))
+                    }
+                    consoleLog(yellow("knots disconnected, reconnecting in 5s..."))
+                    delay(5.seconds)
+                }
             }
 
             Peer(
@@ -349,6 +364,10 @@ class Phoenixd : CliktCommand() {
         } else {
             val mempoolSpace = MempoolSpaceClient(mempoolSpaceUrl, loggerFactory)
             val watcher = MempoolSpaceWatcher(mempoolSpace, scope, loggerFactory, pollingInterval = mempoolPollingInterval)
+            // For the normal Electrum path, address comes from SwapInWallet (created inside Peer)
+            // We derive index 0 as a fallback; the real rotation happens in SwapInWallet.swapInAddressFlow
+            val fallbackAddress = nodeParams.keyManager.swapInOnChainWallet.getSwapInProtocol(0).address(chain)
+            swapInAddressFlow = MutableStateFlow(fallbackAddress to 0)
             Peer(
                 nodeParams = nodeParams, walletParams = lsp.walletParams, client = mempoolSpace, watcher = watcher, db = object : Databases {
                     override val channels: ChannelsDb get() = channelsDb
@@ -465,6 +484,10 @@ class Phoenixd : CliktCommand() {
             peer.connectionState.first { it == Connection.ESTABLISHED }
         }
 
+        // Start watching the swap-in wallet so on-chain deposits trigger channel opens.
+        // See Phoenix Android BusinessManager.kt for reference.
+        scope.launch { peer.startWatchSwapInWallet() }
+
         val server = embeddedServer(
             CIO,
             environment = applicationEnvironment {
@@ -478,7 +501,7 @@ class Phoenixd : CliktCommand() {
                 reuseAddress = true
             },
             module = {
-                Api(nodeParams, peer, eventsFlow, httpOptions.httpPassword, httpOptions.httpPasswordLimitedAccess, httpOptions.webHookUrls, httpOptions.webHookSecret, loggerFactory).run { module() }
+                Api(nodeParams, peer, eventsFlow, swapInAddressFlow, httpOptions.httpPassword, httpOptions.httpPasswordLimitedAccess, httpOptions.webHookUrls, httpOptions.webHookSecret, loggerFactory).run { module() }
             }
         )
 

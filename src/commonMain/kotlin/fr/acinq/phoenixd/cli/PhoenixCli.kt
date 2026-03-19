@@ -47,6 +47,7 @@ fun main(args: Array<String>) =
         .subcommands(
             GetInfo(),
             GetBalance(),
+            GetSwapInAddress(),
             EstimateLiquidityFees(),
             ListChannels(),
             GetOutgoingPayment(),
@@ -140,6 +141,12 @@ class GetInfo : PhoenixCliCommand(name = "getinfo", help = "Show basic info abou
 class GetBalance : PhoenixCliCommand(name = "getbalance", help = "Returns your current balance") {
     override suspend fun httpRequest() = commonOptions.httpClient.use {
         it.get(url = commonOptions.baseUrl / "getbalance")
+    }
+}
+
+class GetSwapInAddress : PhoenixCliCommand(name = "getswapinaddress", help = "Returns the on-chain swap-in address for receiving funds") {
+    override suspend fun httpRequest() = commonOptions.httpClient.use {
+        it.get(url = commonOptions.baseUrl / "getswapinaddress")
     }
 }
 
