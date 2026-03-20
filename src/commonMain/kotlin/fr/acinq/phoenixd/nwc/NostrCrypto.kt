@@ -167,6 +167,33 @@ object NostrCrypto {
         )
     }
 
+    // -- NIP-04 Encryption (deprecated, for backwards compatibility) --
+
+    /** Compute NIP-04 shared secret: raw ECDH x-coordinate (no HKDF). */
+    fun nip04SharedSecret(privateKey: PrivateKey, publicKey: PublicKey): ByteArray {
+        val sharedPoint = publicKey.times(privateKey)
+        return sharedPoint.xOnly().value.toByteArray()
+    }
+
+    /** NIP-04 encrypt: AES-256-CBC with random IV, format: base64(ciphertext)?iv=base64(iv) */
+    fun nip04Encrypt(sharedSecret: ByteArray, plaintext: String, iv: ByteArray = Random.nextBytes(16)): String {
+        require(sharedSecret.size == 32) { "shared secret must be 32 bytes" }
+        require(iv.size == 16) { "IV must be 16 bytes" }
+        val ciphertext = Aes256Cbc.encrypt(sharedSecret, iv, plaintext.encodeToByteArray())
+        return "${ciphertext.encodeBase64()}?iv=${iv.encodeBase64()}"
+    }
+
+    /** NIP-04 decrypt: parse base64(ciphertext)?iv=base64(iv), decrypt with AES-256-CBC. */
+    fun nip04Decrypt(sharedSecret: ByteArray, encoded: String): String {
+        require(sharedSecret.size == 32) { "shared secret must be 32 bytes" }
+        val parts = encoded.split("?iv=")
+        require(parts.size == 2) { "invalid NIP-04 format, expected ciphertext?iv=iv" }
+        val ciphertext = parts[0].decodeBase64()
+        val iv = parts[1].decodeBase64()
+        require(iv.size == 16) { "NIP-04 IV must be 16 bytes" }
+        return Aes256Cbc.decrypt(sharedSecret, iv, ciphertext).decodeToString()
+    }
+
     // -- Helpers --
 
     private fun ByteArray.hmacSha256(key: ByteArray): ByteArray {

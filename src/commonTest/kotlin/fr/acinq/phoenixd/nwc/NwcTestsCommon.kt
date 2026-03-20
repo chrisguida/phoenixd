@@ -455,6 +455,80 @@ class NwcTestsCommon {
         assertTrue(elapsed2 >= budgetIntervalSecs * 1000, "should reset after 61 min")
     }
 
+    // -- Test 16: AES-256-CBC --
+
+    @Test
+    fun `aes256cbc encrypt-decrypt roundtrip`() {
+        val key = ByteArray(32) { it.toByte() }
+        val iv = ByteArray(16) { (0xf0 + it).toByte() }
+        val plaintext = "Hello NIP-04!".encodeToByteArray()
+
+        val ciphertext = Aes256Cbc.encrypt(key, iv, plaintext)
+        val decrypted = Aes256Cbc.decrypt(key, iv, ciphertext)
+        assertTrue(plaintext.contentEquals(decrypted))
+    }
+
+    @Test
+    fun `aes256cbc known test vector`() {
+        // NIST AES-256-CBC test vector (F.2.5/F.2.6 from SP 800-38A)
+        val key = "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4".hexToByteArray()
+        val iv = "000102030405060708090a0b0c0d0e0f".hexToByteArray()
+        val plaintext = "6bc1bee22e409f96e93d7e117393172a".hexToByteArray()
+
+        val ciphertext = Aes256Cbc.encrypt(key, iv, plaintext)
+        // First block of ciphertext should match NIST vector
+        // The output includes PKCS#7 padding (adds a full 16-byte pad block)
+        assertEquals(32, ciphertext.size) // 16 plaintext + 16 padding
+        val firstBlock = ciphertext.sliceArray(0 until 16)
+        assertEquals("f58c4c04d6e5f1ba779eabfb5f7bfbd6", firstBlock.toHex())
+    }
+
+    @Test
+    fun `aes256cbc various plaintext lengths`() {
+        val key = ByteArray(32) { (it * 3).toByte() }
+        val iv = ByteArray(16) { (it * 7).toByte() }
+
+        // Test empty, 1 byte, 15 bytes, 16 bytes, 17 bytes, 256 bytes
+        for (len in listOf(0, 1, 15, 16, 17, 256)) {
+            val plaintext = ByteArray(len) { (it % 256).toByte() }
+            val ciphertext = Aes256Cbc.encrypt(key, iv, plaintext)
+            val decrypted = Aes256Cbc.decrypt(key, iv, ciphertext)
+            assertTrue(plaintext.contentEquals(decrypted), "roundtrip failed for $len-byte plaintext")
+        }
+    }
+
+    // -- Test 17: NIP-04 encrypt/decrypt --
+
+    @Test
+    fun `nip04 encrypt-decrypt roundtrip`() {
+        val alice = PrivateKey.fromHex("0000000000000000000000000000000000000000000000000000000000000002")
+        val bob = PrivateKey.fromHex("0000000000000000000000000000000000000000000000000000000000000003")
+
+        val sharedAlice = NostrCrypto.nip04SharedSecret(alice, bob.publicKey())
+        val sharedBob = NostrCrypto.nip04SharedSecret(bob, alice.publicKey())
+        assertTrue(sharedAlice.contentEquals(sharedBob), "NIP-04 shared secrets must match")
+
+        val plaintext = "Hello NIP-04 from phoenixd!"
+        val encrypted = NostrCrypto.nip04Encrypt(sharedAlice, plaintext)
+
+        // Verify format: base64?iv=base64
+        assertTrue(encrypted.contains("?iv="), "NIP-04 format must contain ?iv=")
+
+        val decrypted = NostrCrypto.nip04Decrypt(sharedBob, encrypted)
+        assertEquals(plaintext, decrypted)
+    }
+
+    @Test
+    fun `nip04 shared secret differs from nip44 conversation key`() {
+        val alice = PrivateKey.fromHex("0000000000000000000000000000000000000000000000000000000000000002")
+        val bob = PrivateKey.fromHex("0000000000000000000000000000000000000000000000000000000000000003")
+
+        val nip04Secret = NostrCrypto.nip04SharedSecret(alice, bob.publicKey())
+        val nip44Key = NostrCrypto.nip44ConversationKey(alice, bob.publicKey())
+        // NIP-04 uses raw ECDH x-coordinate, NIP-44 applies HKDF — they must differ
+        assertTrue(!nip04Secret.contentEquals(nip44Key), "NIP-04 and NIP-44 keys must differ")
+    }
+
     // -- Helpers --
 
     private fun makeTestEvent(

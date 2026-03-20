@@ -249,7 +249,7 @@ class NwcService(
     private suspend fun publishInfoEvent(relay: NostrRelay, conn: NwcConnection) {
         val capabilities = Nip47Methods.ALL.joinToString(" ")
         val tags = listOf(
-            listOf("encryption", "nip44_v2"),
+            listOf("encryption", "nip44_v2", "nip04"),
             listOf("notifications", "payment_received payment_sent"),
         )
         val event = NostrCrypto.signEvent(
@@ -278,15 +278,22 @@ class NwcService(
 
     private suspend fun handleNip47Request(relay: NostrRelay, conn: NwcConnection, event: NostrEvent) {
         try {
-            val conversationKey = NostrCrypto.nip44ConversationKey(conn.walletPrivateKey, conn.clientPubkey)
-            val decrypted = NostrCrypto.nip44Decrypt(conversationKey, event.content)
-            log.debug { "NWC request: $decrypted" }
+            // Try NIP-44 first, fall back to NIP-04
+            val (decrypted, useNip44) = decryptRequest(conn, event.content)
+            log.debug { "NWC request (nip44=$useNip44): $decrypted" }
 
             val request = json.decodeFromString<Nip47Request>(decrypted)
             val response = processRequest(conn, request)
 
             val responseJson = json.encodeToString(Nip47Response.serializer(), response)
-            val encrypted = NostrCrypto.nip44Encrypt(conversationKey, responseJson)
+            // Respond with the same encryption method the client used
+            val encrypted = if (useNip44) {
+                val conversationKey = NostrCrypto.nip44ConversationKey(conn.walletPrivateKey, conn.clientPubkey)
+                NostrCrypto.nip44Encrypt(conversationKey, responseJson)
+            } else {
+                val sharedSecret = NostrCrypto.nip04SharedSecret(conn.walletPrivateKey, conn.clientPubkey)
+                NostrCrypto.nip04Encrypt(sharedSecret, responseJson)
+            }
 
             val tags = listOf(
                 listOf("p", event.pubkey.toHex()),
@@ -302,6 +309,18 @@ class NwcService(
             relay.sendEvent(responseEvent)
         } catch (e: Exception) {
             log.warning { "failed to handle NWC request: ${e.message}" }
+        }
+    }
+
+    /** Try NIP-44 decryption first, fall back to NIP-04. Returns (plaintext, usedNip44). */
+    private fun decryptRequest(conn: NwcConnection, content: String): Pair<String, Boolean> {
+        return try {
+            val conversationKey = NostrCrypto.nip44ConversationKey(conn.walletPrivateKey, conn.clientPubkey)
+            Pair(NostrCrypto.nip44Decrypt(conversationKey, content), true)
+        } catch (e: Exception) {
+            log.debug { "NIP-44 decrypt failed, trying NIP-04: ${e.message}" }
+            val sharedSecret = NostrCrypto.nip04SharedSecret(conn.walletPrivateKey, conn.clientPubkey)
+            Pair(NostrCrypto.nip04Decrypt(sharedSecret, content), false)
         }
     }
 
@@ -581,23 +600,45 @@ class NwcService(
         for ((connId, relay) in relays) {
             val conn = db.getById(connId) ?: continue
             try {
-                val conversationKey = NostrCrypto.nip44ConversationKey(conn.walletPrivateKey, conn.clientPubkey)
                 val notification = Nip47Notification(
                     notificationType = notificationType,
                     notification = paymentData,
                 )
                 val notifJson = json.encodeToString(Nip47Notification.serializer(), notification)
-                val encrypted = NostrCrypto.nip44Encrypt(conversationKey, notifJson)
                 val clientPubkeyHex = conn.clientPubkey.xOnly().value.toHex()
                 val tags = listOf(listOf("p", clientPubkeyHex))
-                val event = NostrCrypto.signEvent(
-                    privateKey = conn.walletPrivateKey,
-                    createdAt = currentTimestampSeconds(),
-                    kind = Nip47Kinds.NOTIFICATION_NIP44,
-                    tags = tags,
-                    content = encrypted,
-                )
-                relay.sendEvent(event)
+                val now = currentTimestampSeconds()
+
+                // Send NIP-44 notification (kind 23197)
+                try {
+                    val conversationKey = NostrCrypto.nip44ConversationKey(conn.walletPrivateKey, conn.clientPubkey)
+                    val nip44Event = NostrCrypto.signEvent(
+                        privateKey = conn.walletPrivateKey,
+                        createdAt = now,
+                        kind = Nip47Kinds.NOTIFICATION_NIP44,
+                        tags = tags,
+                        content = NostrCrypto.nip44Encrypt(conversationKey, notifJson),
+                    )
+                    relay.sendEvent(nip44Event)
+                } catch (e: Exception) {
+                    log.warning { "failed to send NIP-44 notification for ${conn.label}: ${e.message}" }
+                }
+
+                // Send NIP-04 notification (kind 23196)
+                try {
+                    val sharedSecret = NostrCrypto.nip04SharedSecret(conn.walletPrivateKey, conn.clientPubkey)
+                    val nip04Event = NostrCrypto.signEvent(
+                        privateKey = conn.walletPrivateKey,
+                        createdAt = now,
+                        kind = Nip47Kinds.NOTIFICATION_NIP04,
+                        tags = tags,
+                        content = NostrCrypto.nip04Encrypt(sharedSecret, notifJson),
+                    )
+                    relay.sendEvent(nip04Event)
+                } catch (e: Exception) {
+                    log.warning { "failed to send NIP-04 notification for ${conn.label}: ${e.message}" }
+                }
+
                 log.info { "sent $notificationType notification for connection ${conn.label}" }
             } catch (e: Exception) {
                 log.warning { "failed to send notification for connection ${conn.label}: ${e.message}" }
