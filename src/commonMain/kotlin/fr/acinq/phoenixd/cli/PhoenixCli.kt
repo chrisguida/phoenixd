@@ -69,7 +69,11 @@ fun main(args: Array<String>) =
             SendToAddress(),
             BumpFee(),
             CloseChannel(),
-            ExportCsv()
+            ExportCsv(),
+            NwcCreate(),
+            NwcList(),
+            NwcShow(),
+            NwcRevoke()
         )
         .main(args)
 
@@ -459,6 +463,45 @@ class ExportCsv : PhoenixCliCommand(name = "exportcsv", help = "Export transacti
                 from?.let { append("from", it.toString()) }
                 to?.let { append("to", it.toString()) }
             }
+        )
+    }
+}
+
+class NwcCreate : PhoenixCliCommand(name = "nwc-create", help = "Create a new NWC connection", printHelpOnEmptyArgs = true) {
+    private val label by option("--label").required()
+    private val budgetMsat by option("--budget-msat").long().help { "Max spend budget in millisatoshis (optional)" }
+    private val budgetIntervalSecs by option("--budget-interval-secs").long().help { "Budget refresh interval in seconds (optional)" }
+    override suspend fun httpRequest() = commonOptions.httpClient.use {
+        it.submitForm(
+            url = (commonOptions.baseUrl / "nwc/create").toString(),
+            formParameters = parameters {
+                append("label", label)
+                budgetMsat?.let { append("budgetMsat", it.toString()) }
+                budgetIntervalSecs?.let { append("budgetIntervalSecs", it.toString()) }
+            }
+        )
+    }
+}
+
+class NwcList : PhoenixCliCommand(name = "nwc-list", help = "List NWC connections") {
+    override suspend fun httpRequest() = commonOptions.httpClient.use {
+        it.get(url = commonOptions.baseUrl / "nwc/list")
+    }
+}
+
+class NwcShow : PhoenixCliCommand(name = "nwc-show", help = "Show NWC connection details", printHelpOnEmptyArgs = true) {
+    private val id by option("--id").required()
+    override suspend fun httpRequest() = commonOptions.httpClient.use {
+        it.get(url = commonOptions.baseUrl / "nwc/show/$id")
+    }
+}
+
+class NwcRevoke : PhoenixCliCommand(name = "nwc-revoke", help = "Revoke an NWC connection", printHelpOnEmptyArgs = true) {
+    private val id by option("--id").required()
+    override suspend fun httpRequest() = commonOptions.httpClient.use {
+        it.submitForm(
+            url = (commonOptions.baseUrl / "nwc/revoke/$id").toString(),
+            formParameters = parameters {}
         )
     }
 }

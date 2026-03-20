@@ -147,6 +147,8 @@ kotlin {
                 implementation("io.ktor:ktor-client-content-negotiation:${libs.versions.ktor.get()}")
                 implementation("io.ktor:ktor-client-auth:${libs.versions.ktor.get()}")
                 implementation("io.ktor:ktor-client-json:${libs.versions.ktor.get()}")
+                // ktor client websockets (needed for NWC/Nostr relay)
+                implementation("io.ktor:ktor-client-websockets:${libs.versions.ktor.get()}")
 
                 implementation("org.jetbrains.kotlinx:kotlinx-io-core:${libs.versions.kotlinx.io.get()}")
                 implementation("com.github.ajalt.clikt:clikt:${libs.versions.clikt.get()}")

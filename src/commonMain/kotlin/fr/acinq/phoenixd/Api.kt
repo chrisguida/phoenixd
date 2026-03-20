@@ -39,6 +39,7 @@ import fr.acinq.phoenixd.payments.lnurl.models.Lnurl
 import fr.acinq.phoenixd.payments.lnurl.models.LnurlAuth
 import fr.acinq.phoenixd.payments.lnurl.models.LnurlPay
 import fr.acinq.phoenixd.payments.lnurl.models.LnurlWithdraw
+import fr.acinq.phoenixd.nwc.NwcService
 import io.ktor.client.*
 import io.ktor.client.request.*
 import io.ktor.http.*
@@ -55,9 +56,8 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
-import kotlinx.coroutines.async
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.launch
 import kotlinx.io.bytestring.encodeToByteString
 import kotlinx.io.files.Path
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -74,6 +74,7 @@ class Api(
     private val webhookUrls: List<Url>,
     private val webhookSecret: String,
     private val loggerFactory: LoggerFactory,
+    private val nwcService: NwcService? = null,
 ) {
 
     @OptIn(ExperimentalStdlibApi::class)
@@ -493,6 +494,38 @@ class Api(
                     csvWriter.close()
                     log.info { "csv export completed" }
                     call.respond("payment history has been exported to $csvPath")
+                }
+                // NWC management endpoints
+                authenticate("full-access", strategy = AuthenticationStrategy.Required) {
+                    post("nwc/create") {
+                        val svc = nwcService ?: badRequest("NWC is not enabled (start with --nwc)")
+                        val formParameters = call.receiveParameters()
+                        val label = formParameters.getString("label")
+                        val budgetMsat = formParameters.getOptionalLong("budgetMsat")
+                        val budgetIntervalSecs = formParameters.getOptionalLong("budgetIntervalSecs")
+                        val scope = call.application.let { CoroutineScope(Dispatchers.Default + SupervisorJob()) }
+                        val info = svc.createConnection(scope, label, budgetMsat, budgetIntervalSecs)
+                        call.respond(info)
+                    }
+                    get("nwc/list") {
+                        val svc = nwcService ?: badRequest("NWC is not enabled (start with --nwc)")
+                        call.respond(svc.listConnections())
+                    }
+                    get("nwc/show/{id}") {
+                        val svc = nwcService ?: badRequest("NWC is not enabled (start with --nwc)")
+                        val id = call.parameters.getString("id")
+                        val conn = svc.getConnection(id) ?: badRequest("connection not found")
+                        call.respond(conn)
+                    }
+                    post("nwc/revoke/{id}") {
+                        val svc = nwcService ?: badRequest("NWC is not enabled (start with --nwc)")
+                        val id = call.parameters.getString("id")
+                        if (svc.revokeConnection(id)) {
+                            call.respondText("connection revoked")
+                        } else {
+                            badRequest("connection not found")
+                        }
+                    }
                 }
             }
             route("/websocket") {

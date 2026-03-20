@@ -48,6 +48,7 @@ import fr.acinq.phoenixd.db.SqliteChannelsDb
 import fr.acinq.phoenixd.db.SqlitePaymentsDb
 import fr.acinq.phoenixd.db.createPhoenixDb
 import fr.acinq.phoenixd.json.ApiType
+import fr.acinq.phoenixd.nwc.NwcService
 import fr.acinq.phoenixd.logs.TimestampFormatter
 import fr.acinq.phoenixd.logs.stringTimestamp
 import io.ktor.http.*
@@ -209,6 +210,10 @@ class Phoenixd : CliktCommand() {
         "--silent" to Verbosity.Silent,
         "--verbose" to Verbosity.Verbose
     ).default(Verbosity.Default, defaultForHelp = "prints high-level info to the console")
+
+    private val nwcEnabled by option("--nwc", help = "Enable Nostr Wallet Connect (NWC) support").flag()
+    private val nwcRelayUrl by option("--nwc-relay", help = "Nostr relay URL for NWC (default: wss://relay.getalby.com/v1)")
+        .default("wss://relay.getalby.com/v1")
 
     init {
         SystemFileSystem.createDirectories(datadir)
@@ -488,6 +493,14 @@ class Phoenixd : CliktCommand() {
         // See Phoenix Android BusinessManager.kt for reference.
         scope.launch { peer.startWatchSwapInWallet() }
 
+        // Start NWC service if enabled
+        val nwcService = if (nwcEnabled) {
+            consoleLog(cyan("NWC enabled, relay: $nwcRelayUrl"))
+            NwcService(nodeParams, peer, nwcRelayUrl, driver, loggerFactory).also {
+                it.start(scope)
+            }
+        } else null
+
         val server = embeddedServer(
             CIO,
             environment = applicationEnvironment {
@@ -501,7 +514,7 @@ class Phoenixd : CliktCommand() {
                 reuseAddress = true
             },
             module = {
-                Api(nodeParams, peer, eventsFlow, swapInAddressFlow, httpOptions.httpPassword, httpOptions.httpPasswordLimitedAccess, httpOptions.webHookUrls, httpOptions.webHookSecret, loggerFactory).run { module() }
+                Api(nodeParams, peer, eventsFlow, swapInAddressFlow, httpOptions.httpPassword, httpOptions.httpPasswordLimitedAccess, httpOptions.webHookUrls, httpOptions.webHookSecret, loggerFactory, nwcService).run { module() }
             }
         )
 
