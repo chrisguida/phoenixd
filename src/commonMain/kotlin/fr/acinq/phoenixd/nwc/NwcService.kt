@@ -61,11 +61,52 @@ class NwcService(
         // Watch for payment events to send notifications
         scope.launch {
             nodeParams.nodeEvents
-                .filterIsInstance<PaymentEvents.PaymentReceived>()
+                .filterIsInstance<PaymentEvents>()
                 .collect { event ->
-                    val payment = event.payment
-                    if (payment is LightningIncomingPayment) {
-                        sendPaymentReceivedNotification(payment)
+                    when (event) {
+                        is PaymentEvents.PaymentReceived -> {
+                            val payment = event.payment
+                            if (payment is LightningIncomingPayment) {
+                                sendPaymentNotification("payment_received", buildJsonObject {
+                                    put("type", "incoming")
+                                    val inv = (payment as? fr.acinq.lightning.db.Bolt11IncomingPayment)?.paymentRequest
+                                    put("invoice", inv?.write() ?: "")
+                                    put("description", inv?.description ?: "")
+                                    put("description_hash", "")
+                                    put("preimage", payment.paymentPreimage.toHex())
+                                    put("payment_hash", payment.paymentHash.toHex())
+                                    put("amount", payment.amount.toLong())
+                                    put("fees_paid", payment.fees.toLong())
+                                    put("created_at", payment.createdAt / 1000)
+                                    put("settled_at", payment.completedAt?.let { it / 1000 })
+                                    putJsonObject("metadata") {}
+                                })
+                            }
+                        }
+                        is PaymentEvents.PaymentSent -> {
+                            val payment = event.payment
+                            if (payment is LightningOutgoingPayment) {
+                                sendPaymentNotification("payment_sent", buildJsonObject {
+                                    put("type", "outgoing")
+                                    val details = payment.details
+                                    if (details is LightningOutgoingPayment.Details.Normal) {
+                                        put("invoice", details.paymentRequest.write())
+                                        put("description", details.paymentRequest.description ?: "")
+                                    } else {
+                                        put("invoice", "")
+                                        put("description", "")
+                                    }
+                                    put("description_hash", "")
+                                    put("preimage", (payment.status as? LightningOutgoingPayment.Status.Succeeded)?.preimage?.toHex() ?: "")
+                                    put("payment_hash", payment.paymentHash.toHex())
+                                    put("amount", payment.recipientAmount.toLong())
+                                    put("fees_paid", payment.routingFee.toLong())
+                                    put("created_at", payment.createdAt / 1000)
+                                    put("settled_at", (payment.status as? LightningOutgoingPayment.Status.Succeeded)?.completedAt?.let { it / 1000 })
+                                    putJsonObject("metadata") {}
+                                })
+                            }
+                        }
                     }
                 }
         }
@@ -525,27 +566,14 @@ class NwcService(
 
     // -- Notifications --
 
-    private suspend fun sendPaymentReceivedNotification(payment: LightningIncomingPayment) {
+    private suspend fun sendPaymentNotification(notificationType: String, paymentData: JsonObject) {
         for ((connId, relay) in relays) {
             val conn = db.getById(connId) ?: continue
             try {
                 val conversationKey = NostrCrypto.nip44ConversationKey(conn.walletPrivateKey, conn.clientPubkey)
                 val notification = Nip47Notification(
-                    notificationType = "payment_received",
-                    notification = buildJsonObject {
-                        put("type", "incoming")
-                        val inv = (payment as? fr.acinq.lightning.db.Bolt11IncomingPayment)?.paymentRequest
-                        put("invoice", inv?.write() ?: "")
-                        put("description", inv?.description ?: "")
-                        put("description_hash", "")
-                        put("preimage", payment.paymentPreimage.toHex())
-                        put("payment_hash", payment.paymentHash.toHex())
-                        put("amount", payment.amount.toLong())
-                        put("fees_paid", payment.fees.toLong())
-                        put("created_at", payment.createdAt / 1000)
-                        put("settled_at", payment.completedAt?.let { it / 1000 })
-                        putJsonObject("metadata") {}
-                    }
+                    notificationType = notificationType,
+                    notification = paymentData,
                 )
                 val notifJson = json.encodeToString(Nip47Notification.serializer(), notification)
                 val encrypted = NostrCrypto.nip44Encrypt(conversationKey, notifJson)
@@ -554,11 +582,12 @@ class NwcService(
                 val event = NostrCrypto.signEvent(
                     privateKey = conn.walletPrivateKey,
                     createdAt = currentTimestampSeconds(),
-                    kind = Nip47Kinds.NOTIFICATION,
+                    kind = Nip47Kinds.NOTIFICATION_NIP44,
                     tags = tags,
                     content = encrypted,
                 )
                 relay.sendEvent(event)
+                log.info { "sent $notificationType notification for connection ${conn.label}" }
             } catch (e: Exception) {
                 log.warning { "failed to send notification for connection ${conn.label}: ${e.message}" }
             }

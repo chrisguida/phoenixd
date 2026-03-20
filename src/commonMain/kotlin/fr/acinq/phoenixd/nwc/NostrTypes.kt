@@ -118,7 +118,8 @@ object Nip47Kinds {
     const val INFO = 13194
     const val REQUEST = 23194
     const val RESPONSE = 23195
-    const val NOTIFICATION = 23196
+    const val NOTIFICATION_NIP04 = 23196
+    const val NOTIFICATION_NIP44 = 23197
 }
 
 // -- NIP-47 Request/Response Types --
