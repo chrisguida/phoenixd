@@ -203,7 +203,11 @@ class NwcService(
                 when (msg) {
                     is RelayMessage.Event -> {
                         val eventId = msg.event.id.toHex()
-                        if (msg.event.kind == Nip47Kinds.REQUEST && processedEventIds.add(eventId)) {
+                        // Check expiration tag
+                        val expiration = msg.event.getTagValue("expiration")?.toLongOrNull()
+                        if (expiration != null && expiration < currentTimestampSeconds()) {
+                            log.debug { "ignoring expired NWC event $eventId" }
+                        } else if (msg.event.kind == Nip47Kinds.REQUEST && processedEventIds.add(eventId)) {
                             // Evict oldest entries if cache is full
                             while (processedEventIds.size > maxProcessedEvents) {
                                 processedEventIds.remove(processedEventIds.first())
