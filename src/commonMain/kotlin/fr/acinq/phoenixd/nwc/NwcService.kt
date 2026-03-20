@@ -46,6 +46,8 @@ class NwcService(
     private val db = NwcDb(driver)
     private val relays = mutableMapOf<String, NostrRelay>() // connectionId -> relay
     private val json = Json { ignoreUnknownKeys = true }
+    private val processedEventIds = LinkedHashSet<String>() // dedup cache
+    private val maxProcessedEvents = 1000
 
     fun start(scope: CoroutineScope) {
         db.init()
@@ -200,7 +202,12 @@ class NwcService(
             relay.messages.collect { msg ->
                 when (msg) {
                     is RelayMessage.Event -> {
-                        if (msg.event.kind == Nip47Kinds.REQUEST) {
+                        val eventId = msg.event.id.toHex()
+                        if (msg.event.kind == Nip47Kinds.REQUEST && processedEventIds.add(eventId)) {
+                            // Evict oldest entries if cache is full
+                            while (processedEventIds.size > maxProcessedEvents) {
+                                processedEventIds.remove(processedEventIds.first())
+                            }
                             handleNip47Request(relay, conn, msg.event)
                         }
                     }
