@@ -6,6 +6,7 @@ import fr.acinq.bitcoin.PrivateKey
 import fr.acinq.bitcoin.PublicKey
 import fr.acinq.bitcoin.utils.Either
 import fr.acinq.lightning.Lightning.randomBytes32
+import fr.acinq.lightning.MilliSatoshi
 import fr.acinq.lightning.NodeParams
 import fr.acinq.lightning.PaymentEvents
 import fr.acinq.lightning.channel.states.ChannelStateWithCommitments
@@ -13,6 +14,7 @@ import fr.acinq.lightning.channel.states.Closed
 import fr.acinq.lightning.channel.states.Closing
 import fr.acinq.lightning.db.LightningIncomingPayment
 import fr.acinq.lightning.db.LightningOutgoingPayment
+import fr.acinq.lightning.io.OfferNotPaid
 import fr.acinq.lightning.io.PaymentNotSent
 import fr.acinq.lightning.io.PaymentSent
 import fr.acinq.lightning.io.Peer
@@ -21,6 +23,7 @@ import fr.acinq.lightning.logging.debug
 import fr.acinq.lightning.logging.info
 import fr.acinq.lightning.logging.warning
 import fr.acinq.lightning.payment.Bolt11Invoice
+import fr.acinq.lightning.wire.OfferTypes
 import fr.acinq.lightning.utils.currentTimestampMillis
 import fr.acinq.lightning.utils.currentTimestampSeconds
 import fr.acinq.lightning.utils.msat
@@ -333,6 +336,9 @@ class NwcService(
                 Nip47Methods.PAY_INVOICE -> handlePayInvoice(conn, request.params)
                 Nip47Methods.LOOKUP_INVOICE -> handleLookupInvoice(request.params)
                 Nip47Methods.LIST_TRANSACTIONS -> handleListTransactions(request.params)
+                Nip47Methods.GET_OFFER_INFO -> handleGetOfferInfo(request.params)
+                Nip47Methods.MAKE_OFFER -> handleMakeOffer(request.params)
+                Nip47Methods.PAY_OFFER -> handlePayOffer(conn, request.params, Nip47Methods.PAY_OFFER)
                 else -> Nip47Response(
                     resultType = request.method,
                     error = Nip47Error(Nip47Error.NOT_IMPLEMENTED, "method not supported: ${request.method}")
@@ -408,13 +414,33 @@ class NwcService(
     }
 
     private suspend fun handlePayInvoice(conn: NwcConnection, params: JsonObject): Nip47Response {
-        val bolt11 = params["invoice"]?.jsonPrimitive?.contentOrNull
+        val invoiceStr = params["invoice"]?.jsonPrimitive?.contentOrNull
             ?: return Nip47Response(
                 resultType = Nip47Methods.PAY_INVOICE,
                 error = Nip47Error(Nip47Error.OTHER, "missing invoice parameter")
             )
 
-        val invoice = try { Bolt11Invoice.read(bolt11).get() } catch (_: Exception) {
+        // BOLT12 offer in the invoice field — daywalker-shape extension to pay_invoice,
+        // also implemented on cln-nip47 (commit 645696e). Falls through to BOLT11 otherwise.
+        // BOLT12 invoices ("lni1…") are not handled here: phoenixd only pays offers via
+        // peer.payOffer(), which expects an offer plus a fetchInvoice round-trip.
+        if (invoiceStr.startsWith("lno1", ignoreCase = true)) {
+            val offer = try { OfferTypes.Offer.decode(invoiceStr).get() } catch (_: Exception) {
+                return Nip47Response(
+                    resultType = Nip47Methods.PAY_INVOICE,
+                    error = Nip47Error(Nip47Error.OTHER, "invalid bolt12 offer")
+                )
+            }
+            val offerAmountMsat = params["amount"]?.jsonPrimitive?.longOrNull?.msat ?: offer.amount
+                ?: return Nip47Response(
+                    resultType = Nip47Methods.PAY_INVOICE,
+                    error = Nip47Error(Nip47Error.OTHER, "offer has no amount and no amount provided")
+                )
+            val payerNote = params["metadata"]?.jsonObject?.get("comment")?.jsonPrimitive?.contentOrNull
+            return payOfferInternal(conn, offer, offerAmountMsat, payerNote, Nip47Methods.PAY_INVOICE)
+        }
+
+        val invoice = try { Bolt11Invoice.read(invoiceStr).get() } catch (_: Exception) {
             return Nip47Response(
                 resultType = Nip47Methods.PAY_INVOICE,
                 error = Nip47Error(Nip47Error.OTHER, "invalid bolt11 invoice")
@@ -471,6 +497,139 @@ class NwcService(
                 )
             }
         }
+    }
+
+    /**
+     * Shared offer-payment path used by both `pay_offer` and `pay_invoice` (when the
+     * latter is invoked with an `lno1…` offer string in the `invoice` field).
+     *
+     * @param resultType the method name to echo in the response. Should be the method
+     *                   the client actually requested — so an offer paid via pay_invoice
+     *                   gets a `pay_invoice`-tagged response, not `pay_offer`.
+     */
+    private suspend fun payOfferInternal(
+        conn: NwcConnection,
+        offer: OfferTypes.Offer,
+        amountMsat: MilliSatoshi,
+        payerNote: String?,
+        resultType: String,
+    ): Nip47Response {
+        // Budget check (mirrors handlePayInvoice's BOLT11 path).
+        val freshConn = db.getById(conn.id)
+        if (freshConn != null && freshConn.budgetMsat != null) {
+            if (freshConn.budgetIntervalSecs != null) {
+                val now = currentTimestampMillis()
+                val elapsed = now - freshConn.lastBudgetResetAt
+                if (elapsed >= freshConn.budgetIntervalSecs * 1000) {
+                    db.resetBudget(conn.id, now)
+                }
+            }
+            val currentSpent = db.getById(conn.id)?.spentMsat ?: 0
+            if (currentSpent + amountMsat.toLong() > freshConn.budgetMsat) {
+                return Nip47Response(
+                    resultType = resultType,
+                    error = Nip47Error(Nip47Error.QUOTA_EXCEEDED, "budget exceeded")
+                )
+            }
+        }
+
+        when (val event = peer.payOffer(
+            amount = amountMsat,
+            offer = offer,
+            payerKey = nodeParams.defaultOffer(peer.walletParams.trampolineNode.id).privateKey,
+            payerNote = payerNote,
+            fetchInvoiceTimeout = 30.seconds,
+        )) {
+            is PaymentSent -> {
+                val currentSpent = db.getById(conn.id)?.spentMsat ?: 0
+                db.updateSpent(conn.id, currentSpent + amountMsat.toLong())
+                val result = buildJsonObject {
+                    put("preimage", (event.payment.status as LightningOutgoingPayment.Status.Succeeded).preimage.toHex())
+                    put("fees_paid", event.payment.fees.toLong())
+                }
+                return Nip47Response(resultType = resultType, result = result)
+            }
+            is PaymentNotSent -> {
+                return Nip47Response(
+                    resultType = resultType,
+                    error = Nip47Error(Nip47Error.PAYMENT_FAILED, "payment failed: ${event.reason}")
+                )
+            }
+            is OfferNotPaid -> {
+                return Nip47Response(
+                    resultType = resultType,
+                    error = Nip47Error(Nip47Error.PAYMENT_FAILED, "offer not paid: ${event.reason}")
+                )
+            }
+        }
+    }
+
+    private fun handleGetOfferInfo(params: JsonObject): Nip47Response {
+        val offerStr = params["offer"]?.jsonPrimitive?.contentOrNull
+            ?: return Nip47Response(
+                resultType = Nip47Methods.GET_OFFER_INFO,
+                error = Nip47Error(Nip47Error.OTHER, "missing offer parameter")
+            )
+        val offer = try { OfferTypes.Offer.decode(offerStr).get() } catch (_: Exception) {
+            return Nip47Response(
+                resultType = Nip47Methods.GET_OFFER_INFO,
+                error = Nip47Error(Nip47Error.OTHER, "Not an offer or invalid offer")
+            )
+        }
+        val result = buildJsonObject {
+            put("offer", offer.encode())
+            put("description", offer.description?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("amount", offer.amount?.let { JsonPrimitive(it.toLong()) } ?: JsonNull)
+            put("issuer", offer.issuer?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("expires_at", offer.expirySeconds?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("currency", JsonNull)
+            put("currency_minor_unit", JsonNull)
+        }
+        return Nip47Response(resultType = Nip47Methods.GET_OFFER_INFO, result = result)
+    }
+
+    private fun handleMakeOffer(params: JsonObject): Nip47Response {
+        val amountMsat = params["amount"]?.jsonPrimitive?.longOrNull?.msat
+        val description = params["description"]?.jsonPrimitive?.contentOrNull
+        // NOTE: phoenixd's nodeParams.randomOffer takes only (trampolineNodeId, amount,
+        // description). The #1952 spec also defines `issuer`, `absolute_expiry`,
+        // `single_use`, `currency`, and `currency_minor_unit`. They're accepted (and
+        // not rejected) but currently silently dropped — the response only echoes
+        // back fields actually present in the generated offer.
+
+        val offer = nodeParams.randomOffer(peer.walletParams.trampolineNode.id, amountMsat, description).offer
+        val result = buildJsonObject {
+            put("offer", offer.encode())
+            put("description", offer.description?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("amount", offer.amount?.let { JsonPrimitive(it.toLong()) } ?: JsonNull)
+            put("issuer", offer.issuer?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("expires_at", offer.expirySeconds?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("currency", JsonNull)
+            put("currency_minor_unit", JsonNull)
+            put("single_use", JsonNull)
+        }
+        return Nip47Response(resultType = Nip47Methods.MAKE_OFFER, result = result)
+    }
+
+    private suspend fun handlePayOffer(conn: NwcConnection, params: JsonObject, resultType: String): Nip47Response {
+        val offerStr = params["offer"]?.jsonPrimitive?.contentOrNull
+            ?: return Nip47Response(
+                resultType = resultType,
+                error = Nip47Error(Nip47Error.OTHER, "missing offer parameter")
+            )
+        val offer = try { OfferTypes.Offer.decode(offerStr).get() } catch (_: Exception) {
+            return Nip47Response(
+                resultType = resultType,
+                error = Nip47Error(Nip47Error.OTHER, "invalid offer")
+            )
+        }
+        val amountMsat = params["amount"]?.jsonPrimitive?.longOrNull?.msat ?: offer.amount
+            ?: return Nip47Response(
+                resultType = resultType,
+                error = Nip47Error(Nip47Error.OTHER, "offer has no amount and no amount provided")
+            )
+        val payerNote = params["payer_note"]?.jsonPrimitive?.contentOrNull
+        return payOfferInternal(conn, offer, amountMsat, payerNote, resultType)
     }
 
     private suspend fun handleLookupInvoice(params: JsonObject): Nip47Response {

@@ -170,8 +170,15 @@ object Nip47Methods {
     const val GET_INFO = "get_info"
     const val LOOKUP_INVOICE = "lookup_invoice"
     const val LIST_TRANSACTIONS = "list_transactions"
+    // BOLT12 / NIP-47 #1952 method set
+    const val MAKE_OFFER = "make_offer"
+    const val PAY_OFFER = "pay_offer"
+    const val GET_OFFER_INFO = "get_offer_info"
 
-    val ALL = listOf(PAY_INVOICE, MAKE_INVOICE, GET_BALANCE, GET_INFO, LOOKUP_INVOICE, LIST_TRANSACTIONS)
+    val ALL = listOf(
+        PAY_INVOICE, MAKE_INVOICE, GET_BALANCE, GET_INFO, LOOKUP_INVOICE, LIST_TRANSACTIONS,
+        MAKE_OFFER, PAY_OFFER, GET_OFFER_INFO
+    )
 }
 
 // -- Helpers --
