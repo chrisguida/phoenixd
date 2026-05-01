@@ -183,11 +183,11 @@ private fun jsonEscape(s: String): String = s
     .replace("\r", "\\r")
     .replace("\t", "\\t")
 
-private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+private fun ByteArray.toHex(): String = joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
 internal fun String.hexToByteArray(): ByteArray {
     require(length % 2 == 0) { "hex string must have even length" }
     return ByteArray(length / 2) { i ->
-        ((Character.digit(this[2 * i], 16) shl 4) + Character.digit(this[2 * i + 1], 16)).toByte()
+        ((this[2 * i].digitToInt(16) shl 4) + this[2 * i + 1].digitToInt(16)).toByte()
     }
 }

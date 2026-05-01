@@ -145,7 +145,7 @@ object NostrCrypto {
 
     internal fun calcPaddedLen(unpaddedLen: Int): Int {
         if (unpaddedLen <= 32) return 32
-        val nextPow2 = Integer.highestOneBit(unpaddedLen - 1) shl 1
+        val nextPow2 = (unpaddedLen - 1).takeHighestOneBit() shl 1
         val chunk = maxOf(32, nextPow2 / 8)
         return ((unpaddedLen + chunk - 1) / chunk) * chunk
     }
@@ -207,7 +207,7 @@ object NostrCrypto {
         .replace("\r", "\\r")
         .replace("\t", "\\t")
 
-    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+    private fun ByteArray.toHex(): String = joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 }
 
 // Base64 encode/decode helpers (no-padding)
