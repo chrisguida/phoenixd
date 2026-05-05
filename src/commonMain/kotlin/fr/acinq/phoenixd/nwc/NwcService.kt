@@ -360,7 +360,6 @@ class NwcService(
             put("pubkey", nodeParams.nodeId.toHex())
             put("network", nodeParams.chain.name.lowercase())
             put("block_height", peer.currentTipFlow.value)
-            putJsonArray("block_hash") {}
             putJsonArray("methods") {
                 Nip47Methods.ALL.forEach { add(it) }
             }
