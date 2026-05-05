@@ -331,7 +331,7 @@ class NwcService(
         return try {
             when (request.method) {
                 Nip47Methods.GET_INFO -> handleGetInfo()
-                Nip47Methods.GET_BALANCE -> handleGetBalance()
+                Nip47Methods.GET_BALANCE -> handleGetBalance(conn)
                 Nip47Methods.MAKE_INVOICE -> handleMakeInvoice(request.params)
                 Nip47Methods.PAY_INVOICE -> handlePayInvoice(conn, request.params)
                 Nip47Methods.LOOKUP_INVOICE -> handleLookupInvoice(request.params)
@@ -371,15 +371,35 @@ class NwcService(
         return Nip47Response(resultType = Nip47Methods.GET_INFO, result = result)
     }
 
-    private fun handleGetBalance(): Nip47Response {
-        val balanceMsat = peer.channels.values
+    private fun handleGetBalance(conn: NwcConnection): Nip47Response {
+        val channelBalanceMsat = peer.channels.values
             .filterIsInstance<ChannelStateWithCommitments>()
             .filterNot { it is Closing || it is Closed }
             .map { it.commitments.active.first().availableBalanceForSend(it.commitments.channelParams, it.commitments.changes) }
             .sum().toLong()
 
+        // NIP-47: get_balance returns msats available for THIS connection. When a
+        // budget is set, that's min(channel balance, budgetMsat - spent) so the
+        // client doesn't show a balance it can't actually spend through the
+        // connection. Budget enforcement on pay_invoice/pay_offer is unchanged.
+        val freshConn = db.getById(conn.id)
+        val effectiveBalanceMsat = if (freshConn?.budgetMsat != null) {
+            if (freshConn.budgetIntervalSecs != null) {
+                val now = currentTimestampMillis()
+                val elapsed = now - freshConn.lastBudgetResetAt
+                if (elapsed >= freshConn.budgetIntervalSecs * 1000) {
+                    db.resetBudget(conn.id, now)
+                }
+            }
+            val currentSpent = db.getById(conn.id)?.spentMsat ?: 0
+            val remainingBudget = (freshConn.budgetMsat - currentSpent).coerceAtLeast(0L)
+            minOf(channelBalanceMsat, remainingBudget)
+        } else {
+            channelBalanceMsat
+        }
+
         val result = buildJsonObject {
-            put("balance", balanceMsat)
+            put("balance", effectiveBalanceMsat)
         }
         return Nip47Response(resultType = Nip47Methods.GET_BALANCE, result = result)
     }
