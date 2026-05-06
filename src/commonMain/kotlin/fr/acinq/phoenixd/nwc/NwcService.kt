@@ -187,7 +187,13 @@ class NwcService(
 
     private fun startConnection(scope: CoroutineScope, conn: NwcConnection) {
         val client = HttpClient {
-            install(WebSockets)
+            install(WebSockets) {
+                // Send a WebSocket Ping frame periodically so middleboxes (NAT,
+                // ISP firewall, relay LB) don't silently evict an idle connection.
+                // Without this the read loop in NostrRelay can block forever on a
+                // dead socket and never trigger the reconnect path.
+                pingInterval = 30.seconds
+            }
         }
         val relay = NostrRelay(conn.relayUrl, loggerFactory)
         relays[conn.id] = relay
